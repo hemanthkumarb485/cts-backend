@@ -26,7 +26,9 @@ PARSER_MAP = {"zap": parse_zap, "nuclei": parse_nuclei,
 
 def run_pipeline(files: List[Dict[str, Any]]) -> ScanSession:
     t0 = time.time()
-    session = ScanSession(session_id=str(uuid.uuid4()))
+    from datetime import datetime
+    scan_time = datetime.now().isoformat()
+    session = ScanSession(session_id=str(uuid.uuid4()), scan_date=scan_time)
     all_findings: List[CanonicalFinding] = []
     log.info(f"START session={session.session_id[:8]} files={len(files)}")
     for fi in files:

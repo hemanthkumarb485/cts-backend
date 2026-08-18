@@ -13,7 +13,35 @@ def parse_nmap_xml(content: str) -> List[Dict[str, Any]]:
     try:
         root = ET.fromstring(content)
     except ET.ParseError as e:
-        raise ValueError(f"Nmap XML parse error: {e}")
+        # Try to repair truncated XML
+        try:
+            # Strip trailing unfinished tag, e.g. anything after the last '<' if there is no matching '>'
+            last_lt = content.rfind('<')
+            last_gt = content.rfind('>')
+            repaired_content = content
+            if last_lt > last_gt:
+                repaired_content = content[:last_lt]
+            
+            tags = ["nmaprun", "host", "ports", "port", "hostnames", "script", "table"]
+            open_tags = []
+            for match in re.finditer(r'<(/?)(\w+)[^>]*>', repaired_content):
+                if match.group(0).endswith('/>'):
+                    continue
+                is_close = bool(match.group(1))
+                tag_name = match.group(2)
+                if tag_name in tags:
+                    if is_close:
+                        if open_tags and open_tags[-1] == tag_name:
+                            open_tags.pop()
+                    else:
+                        open_tags.append(tag_name)
+            
+            for tag in reversed(open_tags):
+                repaired_content += f"\n</{tag}>"
+            
+            root = ET.fromstring(repaired_content)
+        except Exception:
+            raise ValueError(f"Nmap XML parse error: {e}")
 
     findings = []
     scanner_version = root.get("version", "")

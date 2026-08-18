@@ -17,11 +17,33 @@ router = APIRouter(prefix="/report", tags=["Report"])
 @router.post("/export/json")
 async def export_json(session: ScanSession):
     """Return the ScanSession as a downloadable JSON file."""
-    content = session.model_dump_json(indent=2)
+    from datetime import datetime
+    generation_time_str = datetime.now().strftime("%d:%m:%Y-%H:%M:%S")
+    
+    scan_time_str = None
+    if session.scan_date:
+        try:
+            dt = datetime.fromisoformat(session.scan_date.replace("Z", "+00:00"))
+            scan_time_str = dt.strftime("%d:%m:%Y-%H:%M:%S")
+        except Exception:
+            scan_time_str = session.scan_date
+            
+    if not scan_time_str:
+        # Fallback for legacy sessions
+        scan_time_str = generation_time_str
+
+    data = session.model_dump()
+    data["report_metadata"] = {
+        "session_id": session.session_id,
+        "scan_ingestion_time": scan_time_str,
+        "report_generation_and_download_time": generation_time_str
+    }
+    
+    content = json.dumps(data, indent=2)
     return StreamingResponse(
         io.BytesIO(content.encode("utf-8")),
         media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=vulnrisk_report.json"},
+        headers={"Content-Disposition": "attachment; filename=vulnerax_report.json"},
     )
 
 
@@ -62,8 +84,25 @@ async def export_pdf(session: ScanSession):
     story = []
 
     # Title
-    story.append(Paragraph("VulnRisk Prioritization Report", title_style))
+    from datetime import datetime
+    generation_time_str = datetime.now().strftime("%d:%m:%Y-%H:%M:%S")
+    
+    scan_time_str = None
+    if session.scan_date:
+        try:
+            dt = datetime.fromisoformat(session.scan_date.replace("Z", "+00:00"))
+            scan_time_str = dt.strftime("%d:%m:%Y-%H:%M:%S")
+        except Exception:
+            scan_time_str = session.scan_date
+            
+    if not scan_time_str:
+        # Fallback for legacy sessions
+        scan_time_str = generation_time_str
+
+    story.append(Paragraph("VulneraX Prioritization Report", title_style))
     story.append(Paragraph(f"Session ID: {session.session_id}", normal))
+    story.append(Paragraph(f"Scan Ingestion Time: {scan_time_str}", normal))
+    story.append(Paragraph(f"Report Generation & Download Time: {generation_time_str}", normal))
     story.append(Spacer(1, 0.3*cm))
 
     # Summary table
@@ -123,5 +162,5 @@ async def export_pdf(session: ScanSession):
     return StreamingResponse(
         buffer,
         media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=vulnrisk_report.pdf"},
+        headers={"Content-Disposition": "attachment; filename=vulnerax_report.pdf"},
     )

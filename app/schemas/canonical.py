@@ -273,6 +273,7 @@ class CanonicalFinding(BaseModel):
 class ScanSession(BaseModel):
     """Top-level pipeline response returned to frontend."""
     session_id: str
+    scan_date: Optional[str] = None
     uploaded_files: List[str] = Field(default_factory=list)
     tools_detected: List[str] = Field(default_factory=list)
     total_raw_findings: int = 0
