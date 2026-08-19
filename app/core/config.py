@@ -12,12 +12,15 @@ APP_NAME: str = os.getenv("APP_NAME", "VulnRisk Prioritization System")
 APP_VERSION: str = os.getenv("APP_VERSION", "1.0.0")
 DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
 
-# --- MySQL ---
-DB_HOST: str = os.getenv("DB_HOST", "localhost")
-DB_PORT: int = int(os.getenv("DB_PORT", "3306"))
-DB_NAME: str = os.getenv("DB_NAME", "vulnrisk_db")
-DB_USER: str = os.getenv("DB_USER", "root")
-DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+# --- Supabase / Postgres ---
+# Auth tokens are verified via Supabase's public JWKS endpoint (see
+# app/core/security.py) — no shared JWT secret needs to be stored here.
+DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+
+# --- Anthropic (remediation suggestions / ticket description enhancement) ---
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 # --- NVD API ---
 NVD_API_KEY: str = os.getenv("NVD_API_KEY", "")
@@ -25,6 +28,9 @@ NVD_API_URL: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
 # --- EPSS API ---
 EPSS_API_URL: str = "https://api.first.org/data/v1/epss"
+
+# --- GitHub Search (unauthenticated PoC lookup) ---
+GITHUB_SEARCH_API_URL: str = "https://api.github.com/search/repositories"
 
 # --- GitHub OAuth ---
 GITHUB_CLIENT_ID: str = os.getenv("GITHUB_CLIENT_ID", "")
@@ -51,4 +57,3 @@ EXPLOITDB_FILE: str = os.path.join(DATA_DIR, "files_exploits.csv")
 # --- File Upload ---
 MAX_UPLOAD_SIZE_MB: int = int(os.getenv("MAX_UPLOAD_SIZE_MB", "1024"))
 UPLOAD_TEMP_DIR: str = os.path.join(BASE_DIR, "tmp", "uploads")
-

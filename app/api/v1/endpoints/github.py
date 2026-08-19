@@ -1,6 +1,6 @@
 """
 github.py — GitHub OAuth + Issues API endpoints.
-Tokens stored encrypted in MySQL. Issues tracked in MySQL.
+Tokens stored encrypted in Supabase Postgres. Issues tracked there too.
 """
 from __future__ import annotations
 from typing import List, Optional
@@ -14,13 +14,20 @@ from app.services.github_service import (
     get_github_scopes, list_user_repos, create_github_issue, _encrypt, _decrypt,
     save_github_connection,
 )
-from app.schemas.canonical import CreateIssueRequest, CreateIssueResponse
+from app.schemas.canonical import CreateIssueRequest, CreateIssueResponse, CanonicalFinding
+from app.core.security import get_current_user
+from app.services.ai_service import enhance_ticket_description
 
 router = APIRouter(prefix="/github", tags=["GitHub"])
 
 
 class ConnectPATRequest(BaseModel):
     pat: str
+
+
+class EnhanceDescriptionRequest(BaseModel):
+    finding_data: CanonicalFinding
+    current_description: Optional[str] = None
 
 
 # ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -57,9 +64,13 @@ async def github_callback(code: str = Query(...), state: str = Query("")):
 
     encrypted_token = _encrypt(token)
 
-    # Persist to MySQL github_connections table
+    # Persist to Supabase github_connections table.
+    # NOTE: this OAuth callback isn't wired up by the frontend (PAT-based
+    # connect is used instead), so there's no app user identity available
+    # here to link — app_user_id is left null for connections made this way.
     try:
         save_github_connection(
+            app_user_id=None,
             user_id=user.get("id"),
             username=user.get("login"),
             email=user.get("email"),
@@ -122,10 +133,10 @@ async def github_callback(code: str = Query(...), state: str = Query("")):
 
 
 @router.post("/connect-pat")
-async def connect_pat(req: ConnectPATRequest):
+async def connect_pat(req: ConnectPATRequest, current_user: dict = Depends(get_current_user)):
     """
     Validate a raw GitHub Personal Access Token (PAT),
-    encrypt it, store it in MySQL, and return connection details.
+    encrypt it, store it in Supabase, and return connection details.
     """
     token = req.pat.strip()
     if not token:
@@ -150,9 +161,10 @@ async def connect_pat(req: ConnectPATRequest):
         warning = ("Fine-grained token detected (or scope header unavailable). Make sure it has "
                    "'Issues: Read and write' permission on the repository you will select.")
 
-    # Save connection to MySQL (non-fatal — OAuth flow tolerates DB being down)
+    # Save connection to Supabase (non-fatal — flow tolerates DB being down)
     try:
         save_github_connection(
+            app_user_id=current_user["id"],
             user_id=user.get("id"),
             username=user.get("login"),
             email=user.get("email"),
@@ -178,7 +190,7 @@ async def connect_pat(req: ConnectPATRequest):
 # ─── Repositories ─────────────────────────────────────────────────────────────
 
 @router.get("/repositories")
-async def get_repositories(encrypted_token: str = Query(...)):
+async def get_repositories(encrypted_token: str = Query(...), current_user: dict = Depends(get_current_user)):
     """List all repos for the connected GitHub user."""
     token = _decrypt(encrypted_token)
     repos = list_user_repos(token)
@@ -198,16 +210,30 @@ async def get_repositories(encrypted_token: str = Query(...)):
     }
 
 
+# ─── Ticket description enhancer ───────────────────────────────────────────────
+
+@router.post("/tickets/enhance-description")
+async def enhance_description(req: EnhanceDescriptionRequest, current_user: dict = Depends(get_current_user)):
+    """Rewrite/expand a ticket description with Claude before issue creation."""
+    try:
+        description = enhance_ticket_description(req.finding_data, req.current_description)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"description": description}
+
+
 # ─── Create Issue ─────────────────────────────────────────────────────────────
 
 @router.post("/issues/create", response_model=CreateIssueResponse)
 async def create_issue(
     req: CreateIssueRequest,
     encrypted_token: str = Query(...),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Create a GitHub issue from a CanonicalFinding.
     The issue body is auto-generated with full vuln details, threat intel, and risk score.
+    Persistence to github_issues happens inside create_github_issue()/save_github_issue_and_repo().
     """
     token = _decrypt(encrypted_token)
     try:
@@ -217,10 +243,6 @@ async def create_issue(
         traceback.print_exc()
         return CreateIssueResponse(success=False, error=f"Unexpected error creating issue: {e}")
 
-    if result.success:
-        # TODO: Persist to MySQL github_issues table when DB is ready
-        pass
-
     return result
 
 
@@ -229,6 +251,7 @@ async def get_issue(
     issue_number: int,
     repo_full_name: str = Query(...),
     encrypted_token: str = Query(...),
+    current_user: dict = Depends(get_current_user),
 ):
     """Fetch a GitHub issue by number."""
     import requests

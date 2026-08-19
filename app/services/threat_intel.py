@@ -13,19 +13,21 @@ FIXED:
 from __future__ import annotations
 import json, os, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import requests
 
-from app.core.config import NVD_API_KEY, NVD_API_URL, EPSS_API_URL, KEV_FILE, EXPLOITDB_FILE
+from app.core.config import NVD_API_KEY, NVD_API_URL, EPSS_API_URL, KEV_FILE, EXPLOITDB_FILE, GITHUB_SEARCH_API_URL
 from app.schemas.canonical import CanonicalFinding, ThreatIntelSchema, DataCompleteness
 
 NVD_TIMEOUT = 8
 NVD_MAX_PARALLEL = 5
 NVD_MAX_CVES = 30
 EPSS_TIMEOUT = 8
+GITHUB_POC_TIMEOUT = 8
 
 _kev_cache: Optional[Dict[str, dict]] = None
 _exploitdb_cache = None
+_github_poc_cache: Dict[str, Tuple[bool, List[str]]] = {}
 
 
 def _load_kev() -> Dict[str, dict]:
@@ -59,6 +61,37 @@ def check_exploitdb(cve_id):
         m = df[mask][["id", "description"]].to_dict("records")
         return len(m) > 0, m
     except Exception: return False, []
+
+def check_github_poc(cve_id: str) -> Tuple[bool, List[str]]:
+    """
+    Unauthenticated GitHub repository search for public PoC/exploit repos
+    naming this CVE. GitHub's unauthenticated Search API is capped at
+    ~10 req/min, so this fails soft (no PoC found) on any error/429 rather
+    than blocking or crashing the scan — same pattern as check_kev/check_exploitdb.
+    """
+    if not cve_id:
+        return False, []
+    key = cve_id.upper()
+    if key in _github_poc_cache:
+        return _github_poc_cache[key]
+    try:
+        r = requests.get(
+            GITHUB_SEARCH_API_URL,
+            params={"q": f'"{cve_id}" exploit', "per_page": 5},
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=GITHUB_POC_TIMEOUT,
+        )
+        if not r.ok:
+            result = (False, [])
+        else:
+            items = r.json().get("items", [])
+            urls = [item.get("html_url") for item in items if item.get("html_url")]
+            result = (len(urls) > 0, urls[:5])
+    except Exception:
+        result = (False, [])
+    _github_poc_cache[key] = result
+    return result
+
 
 def fetch_epss_batch(cve_ids):
     if not cve_ids: return {}
@@ -152,6 +185,10 @@ def enrich_findings(findings: List[CanonicalFinding]) -> List[CanonicalFinding]:
         if has_exploit:
             ti.exploit_ids = [str(e.get("id","")) for e in exploits[:10]]
             ti.exploit_descriptions = [str(e.get("description","")) for e in exploits[:10]]
+        has_github_poc, poc_urls = check_github_poc(cve)
+        ti.has_github_poc = has_github_poc
+        if has_github_poc:
+            ti.github_poc_urls = poc_urls
         nvd = nvd_cache.get(cve)
         if nvd:
             ti.nvd_description = nvd.get("description")

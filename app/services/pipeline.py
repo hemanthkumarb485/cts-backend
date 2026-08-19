@@ -78,7 +78,7 @@ def run_pipeline(files: List[Dict[str, Any]]) -> ScanSession:
 
 
 
-async def run_pipeline_sse(files: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
+async def run_pipeline_sse(files: List[Dict[str, Any]], user_id: str = None) -> AsyncGenerator[str, None]:
     """
     SSE generator for /scan/upload endpoint.
 
@@ -131,4 +131,12 @@ async def run_pipeline_sse(files: List[Dict[str, Any]]) -> AsyncGenerator[str, N
     yield event("scoring", 98, f"Scoring complete - {session.total_scored} scored")
     await asyncio.sleep(0)
     session.processing_time_seconds = elapsed()
+
+    if user_id:
+        try:
+            from app.services.persistence_service import save_scan_session
+            save_scan_session(session, user_id)
+        except Exception as e:
+            log.error(f"Failed to persist scan session {session.session_id}: {e}")
+
     yield event("complete", 100, "Pipeline complete!", data=session.model_dump())

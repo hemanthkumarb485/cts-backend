@@ -1,14 +1,14 @@
 """
 main.py — FastAPI application entry point.
 DB is NOT initialized on startup — stateless pipeline only.
-MySQL is used only for GitHub integration (wired via DB setup later).
+Supabase Postgres is used for GitHub integration + persisted scan results.
 """
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import APP_NAME, APP_VERSION, ALLOWED_ORIGINS, UPLOAD_TEMP_DIR
-from app.core.database import check_db_connection
+from app.core.db import check_db_connection
 
 # Ensure temp upload dir exists
 os.makedirs(UPLOAD_TEMP_DIR, exist_ok=True)

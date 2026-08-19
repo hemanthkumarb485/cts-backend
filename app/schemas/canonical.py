@@ -133,6 +133,8 @@ class ThreatIntelSchema(BaseModel):
     has_public_exploit: bool = False
     exploit_ids: Optional[List[str]] = None
     exploit_descriptions: Optional[List[str]] = None
+    has_github_poc: bool = False
+    github_poc_urls: Optional[List[str]] = None
     enrichment_attempted: bool = False
     enrichment_errors: Optional[List[str]] = None
 
@@ -140,7 +142,7 @@ class ThreatIntelSchema(BaseModel):
 class RiskScoreSchema(BaseModel):
     """
     Scoring modes:
-      cve_based     - CVE present: CVSS x0.40 + KEV x0.25 + EPSS x0.20 + ExploitDB x0.15
+      cve_based     - CVE present: KEV x0.35 + EPSS x0.25 + ExploitDB x0.15 + GitHub PoC x0.15 + CVSS x0.10
       cwe_estimated - No CVE, CWE present: severity x0.55 + Top25 x0.30 + ExploitDB-count x0.15
       unscored      - No CVE, no CWE (bare open ports etc.)
     """
@@ -148,6 +150,7 @@ class RiskScoreSchema(BaseModel):
     kev_component: Optional[float] = None
     epss_component: Optional[float] = None
     exploitdb_component: Optional[float] = None
+    github_poc_component: Optional[float] = None
     cwe_component: Optional[float] = None
     base_score: Optional[float] = None
     criticality_multiplier: float = 1.0
@@ -336,6 +339,7 @@ class CreateIssueRequest(BaseModel):
         default_factory=lambda: ["security", "vulnerability"]
     )
     milestone: Optional[str] = None
+    custom_description: Optional[str] = None
 
 
 class CreateIssueResponse(BaseModel):

@@ -2,8 +2,10 @@
 risk_engine.py - Three-tier composite risk scoring.
 
 TIER A - CVE-based (Nuclei, OpenVAS, Nmap-vulners, ZAP if CVE present):
-    CVSS x0.40 + KEV x0.25 + EPSS x0.20 + ExploitDB x0.15
-    Full P0-P3 range including P0.
+    KEV x0.35 + EPSS x0.25 + ExploitDB x0.15 + GitHub PoC x0.15 + CVSS x0.10
+    Weighted by live-exploitation signal strength (KEV = confirmed
+    exploitation in the wild, down to CVSS = static severity score),
+    not by CVSS severity alone. Full P0-P3 range including P0.
 
 TIER B - CWE-based fallback (ZAP, Nuclei without CVE):
     severity x0.55 + cwe_top25_rank x0.30 + exploitdb_cwe x0.15
@@ -25,7 +27,10 @@ from app.schemas.canonical import (
 )
 
 # ── Tier A weights (CVE-based) ────────────────────────────────────────────────
-W_CVSS = 0.40; W_KEV = 0.25; W_EPSS = 0.20; W_EXPLOIT = 0.15
+# Ordered by exploitation-signal strength: KEV (confirmed) > EPSS (predicted
+# likelihood) > ExploitDB (public exploit code) > GitHub PoC (public repo
+# mentioning the CVE) > CVSS (static severity, weighted lowest).
+W_KEV = 0.35; W_EPSS = 0.25; W_EXPLOIT = 0.15; W_GITHUB_POC = 0.15; W_CVSS = 0.10
 
 # ── Tier B weights (CWE-based) ────────────────────────────────────────────────
 W_SEV = 0.55; W_CWE_TOP25 = 0.30; W_CWE_EXPLOIT = 0.15
@@ -106,8 +111,8 @@ def _norm_cwe(cwe_id):
     return c if re.match(r"CWE-\d+", c) else None
 
 
-def _tier_cve(score, is_kev, epss, has_exploit):
-    if score >= 70 and (is_kev or epss >= 0.5 or has_exploit): return PriorityTier.P0
+def _tier_cve(score, is_kev, epss, has_exploit, has_github_poc):
+    if score >= 70 and (is_kev or epss >= 0.5 or has_exploit or has_github_poc): return PriorityTier.P0
     if score >= 50: return PriorityTier.P1
     if score >= 25: return PriorityTier.P2
     return PriorityTier.P3
@@ -147,13 +152,16 @@ def score_finding(finding: CanonicalFinding) -> CanonicalFinding:
         epss_comp    = epss * 100.0
         has_exploit  = ti.has_public_exploit if ti else False
         exploit_comp = 100.0 if has_exploit else 0.0
-        base  = (cvss_comp*W_CVSS)+(kev_comp*W_KEV)+(epss_comp*W_EPSS)+(exploit_comp*W_EXPLOIT)
+        has_github_poc  = ti.has_github_poc if ti else False
+        github_poc_comp = 100.0 if has_github_poc else 0.0
+        base  = (kev_comp*W_KEV)+(epss_comp*W_EPSS)+(exploit_comp*W_EXPLOIT)+(github_poc_comp*W_GITHUB_POC)+(cvss_comp*W_CVSS)
         final = round(min(100.0, base * multiplier), 2)
         finding.risk_score = RiskScoreSchema(
             cvss_component=round(cvss_comp,2), kev_component=round(kev_comp,2),
             epss_component=round(epss_comp,2), exploitdb_component=round(exploit_comp,2),
+            github_poc_component=round(github_poc_comp,2),
             base_score=round(base,2), criticality_multiplier=multiplier,
-            final_score=final, priority_tier=_tier_cve(final, is_kev, epss, has_exploit),
+            final_score=final, priority_tier=_tier_cve(final, is_kev, epss, has_exploit, has_github_poc),
             scoring_method="cve_based",
         )
         return finding

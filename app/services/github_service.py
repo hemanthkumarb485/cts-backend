@@ -1,7 +1,7 @@
 """
 github_service.py — GitHub Issues API integration.
 Creates richly-formatted issues from CanonicalFinding objects.
-Tokens are encrypted before MySQL storage.
+Tokens are encrypted before Supabase Postgres storage.
 """
 from __future__ import annotations
 from typing import List, Optional, Tuple
@@ -15,22 +15,19 @@ GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_BASE = "https://api.github.com"
 
 
+def _fernet_key() -> bytes:
+    import base64, hashlib
+    return base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest())
+
+
 def _encrypt(token: str) -> str:
-    try:
-        from cryptography.fernet import Fernet
-        import base64, hashlib
-        key = base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest())
-        return Fernet(key).encrypt(token.encode()).decode()
-    except Exception: return token
+    from cryptography.fernet import Fernet
+    return Fernet(_fernet_key()).encrypt(token.encode()).decode()
 
 
 def _decrypt(enc: str) -> str:
-    try:
-        from cryptography.fernet import Fernet
-        import base64, hashlib
-        key = base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest())
-        return Fernet(key).decrypt(enc.encode()).decode()
-    except Exception: return enc
+    from cryptography.fernet import Fernet
+    return Fernet(_fernet_key()).decrypt(enc.encode()).decode()
 
 
 def get_oauth_url(state: str = "") -> str:
@@ -89,7 +86,7 @@ def list_user_repos(token: str) -> List[dict]:
     return repos
 
 
-def build_issue_body(finding: CanonicalFinding) -> str:
+def build_issue_body(finding: CanonicalFinding, custom_description: Optional[str] = None) -> str:
     ti = finding.threat_intel
     risk = finding.risk_score
     asset = finding.asset
@@ -112,8 +109,9 @@ def build_issue_body(finding: CanonicalFinding) -> str:
         row("URL", asset.url or "—"),
         row("Asset Criticality", asset.criticality.value if asset.criticality else "unknown"), "",
     ]
-    if finding.description:
-        lines += ["### 📝 Description", "", finding.description, ""]
+    description = custom_description or finding.description
+    if description:
+        lines += ["### 📝 Description", "", description, ""]
     if ti:
         lines += [
             "### 🛡️ Threat Intelligence", "", "| Signal | Value |", "|---|---|",
@@ -121,8 +119,10 @@ def build_issue_body(finding: CanonicalFinding) -> str:
             row("KEV Date Added", ti.kev_date_added or "—"),
             row("KEV Ransomware", ti.kev_ransomware_use or "—"),
             row("EPSS Score", f"{ti.epss_score:.4f} ({ti.epss_score*100:.1f}%)" if ti.epss_score else "0.0000"),
-            row("💣 Public Exploit", "✅ YES" if ti.has_public_exploit else "❌ No"),
-            row("Exploit IDs", ", ".join(ti.exploit_ids or []) or "—"), "",
+            row("💣 Public Exploit (ExploitDB)", "✅ YES" if ti.has_public_exploit else "❌ No"),
+            row("Exploit IDs", ", ".join(ti.exploit_ids or []) or "—"),
+            row("🐙 GitHub PoC", "✅ YES" if ti.has_github_poc else "❌ No"),
+            row("GitHub PoC URLs", ", ".join(ti.github_poc_urls or []) or "—"), "",
         ]
     if risk:
         method = (risk.scoring_method or "").lower()
@@ -130,10 +130,11 @@ def build_issue_body(finding: CanonicalFinding) -> str:
             lines += [
                 "### 📊 Risk Score Breakdown (CVE)", "",
                 "| Component | Score | Weight | Contribution |", "|---|---|---|---|",
-                f"| CVSS | {f1(risk.cvss_component)}/100 | 40% | {f2((risk.cvss_component or 0)*0.40)} |",
-                f"| KEV | {f1(risk.kev_component)}/100 | 25% | {f2((risk.kev_component or 0)*0.25)} |",
-                f"| EPSS | {f1(risk.epss_component)}/100 | 20% | {f2((risk.epss_component or 0)*0.20)} |",
+                f"| KEV | {f1(risk.kev_component)}/100 | 35% | {f2((risk.kev_component or 0)*0.35)} |",
+                f"| EPSS | {f1(risk.epss_component)}/100 | 25% | {f2((risk.epss_component or 0)*0.25)} |",
                 f"| ExploitDB | {f1(risk.exploitdb_component)}/100 | 15% | {f2((risk.exploitdb_component or 0)*0.15)} |",
+                f"| GitHub PoC | {f1(risk.github_poc_component)}/100 | 15% | {f2((risk.github_poc_component or 0)*0.15)} |",
+                f"| CVSS | {f1(risk.cvss_component)}/100 | 10% | {f2((risk.cvss_component or 0)*0.10)} |",
                 f"| **Base Score** | | | **{f2(risk.base_score)}** |",
                 f"| **Criticality ×** | | | **×{risk.criticality_multiplier or 1.0}** |",
                 f"| **Final Score** | | | **{f1(risk.final_score)}/100** |", "",
@@ -195,7 +196,7 @@ def create_github_issue(token: str, req: CreateIssueRequest) -> CreateIssueRespo
     tier = finding.risk_score.priority_tier.value if finding.risk_score else "VULN"
     host = finding.asset.hostname or finding.asset.ip or "Unknown"
     title = f"[{tier}] {finding.vulnerability_name} — {host}"
-    payload = {"title": title, "body": build_issue_body(finding),
+    payload = {"title": title, "body": build_issue_body(finding, req.custom_description),
                "labels": req.labels or ["security", "vulnerability"]}
     if req.assignee: payload["assignees"] = [req.assignee]
     resp = requests.post(f"{GITHUB_API_BASE}/repos/{req.repo_full_name}/issues",
@@ -223,21 +224,23 @@ def create_github_issue(token: str, req: CreateIssueRequest) -> CreateIssueRespo
     return CreateIssueResponse(success=False, error=_github_error_message(resp, req.repo_full_name))
 
 
-def save_github_connection(user_id: int, username: str, email: Optional[str], encrypted_token: str, scope: Optional[str]):
-    from app.core.database import get_connection
+def save_github_connection(app_user_id: str, user_id: int, username: str, email: Optional[str], encrypted_token: str, scope: Optional[str]):
+    from app.core.db import get_connection
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             sql = """
-                INSERT INTO github_connections (github_user_id, github_username, github_email, access_token_encrypted, token_scope)
-                VALUES (%s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    github_username = VALUES(github_username),
-                    github_email = VALUES(github_email),
-                    access_token_encrypted = VALUES(access_token_encrypted),
-                    token_scope = VALUES(token_scope)
+                INSERT INTO github_connections (app_user_id, github_user_id, github_username, github_email, access_token_encrypted, token_scope)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (github_user_id) DO UPDATE SET
+                    app_user_id = EXCLUDED.app_user_id,
+                    github_username = EXCLUDED.github_username,
+                    github_email = EXCLUDED.github_email,
+                    access_token_encrypted = EXCLUDED.access_token_encrypted,
+                    token_scope = EXCLUDED.token_scope,
+                    updated_at = now()
             """
-            cursor.execute(sql, (user_id, username, email, encrypted_token, scope))
+            cursor.execute(sql, (app_user_id, user_id, username, email, encrypted_token, scope))
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -247,15 +250,15 @@ def save_github_connection(user_id: int, username: str, email: Optional[str], en
 
 
 def save_github_issue_and_repo(token: str, repo_full_name: str, finding_id: str, issue_number: int, issue_url: str, issue_title: str, assignee: Optional[str], labels: Optional[List[str]], milestone: Optional[str]):
-    from app.core.database import get_connection
+    from app.core.db import get_connection
     import json
-    
+
     # 1. Fetch user info to get github_user_id
     user = get_github_user(token)
     if not user:
         return
     github_user_id = user.get("id")
-    
+
     # 2. Get connection_id from github_connections
     conn = get_connection()
     try:
@@ -265,7 +268,7 @@ def save_github_issue_and_repo(token: str, repo_full_name: str, finding_id: str,
             if not row:
                 return
             connection_id = row["id"]
-            
+
             # 3. Fetch repo details from GitHub to populate github_repositories
             resp = requests.get(f"{GITHUB_API_BASE}/repos/{repo_full_name}",
                                 headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
@@ -275,34 +278,34 @@ def save_github_issue_and_repo(token: str, repo_full_name: str, finding_id: str,
             repo_data = resp.json()
             repo_id = repo_data.get("id")
             repo_name = repo_data.get("name")
-            is_private = 1 if repo_data.get("private") else 0
+            is_private = bool(repo_data.get("private"))
             repo_url = repo_data.get("html_url")
-            
+
             # 4. Insert or Update github_repositories
             cursor.execute("""
                 INSERT INTO github_repositories (connection_id, repo_id, repo_name, repo_full_name, is_private, repo_url)
                 VALUES (%s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    repo_name = VALUES(repo_name),
-                    repo_full_name = VALUES(repo_full_name),
-                    is_private = VALUES(is_private),
-                    repo_url = VALUES(repo_url)
+                ON CONFLICT (connection_id, repo_id) DO UPDATE SET
+                    repo_name = EXCLUDED.repo_name,
+                    repo_full_name = EXCLUDED.repo_full_name,
+                    is_private = EXCLUDED.is_private,
+                    repo_url = EXCLUDED.repo_url
             """, (connection_id, repo_id, repo_name, repo_full_name, is_private, repo_url))
-            
+
             # Get the repo's DB id
             cursor.execute("SELECT id FROM github_repositories WHERE connection_id = %s AND repo_id = %s", (connection_id, repo_id))
             repo_row = cursor.fetchone()
             if not repo_row:
                 return
             repository_id = repo_row["id"]
-            
+
             # 5. Insert into github_issues
             labels_json = json.dumps(labels or [])
             cursor.execute("""
                 INSERT INTO github_issues (connection_id, repository_id, finding_id, issue_number, issue_url, issue_title, status, assignee, labels, milestone)
                 VALUES (%s, %s, %s, %s, %s, %s, 'open', %s, %s, %s)
             """, (connection_id, repository_id, finding_id, issue_number, issue_url, issue_title, assignee, labels_json, milestone))
-            
+
         conn.commit()
     except Exception as e:
         conn.rollback()

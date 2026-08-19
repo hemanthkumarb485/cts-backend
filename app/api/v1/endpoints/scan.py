@@ -5,13 +5,18 @@ POST /process     → Synchronous process (for testing)
 """
 from __future__ import annotations
 import json
+import logging
 from typing import List, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.pipeline import run_pipeline_sse, run_pipeline
 from app.schemas.canonical import ScanSession
+from app.core.security import get_current_user
+from app.services.persistence_service import save_scan_session
+
+log = logging.getLogger("scan_endpoint")
 
 router = APIRouter(prefix="/scan", tags=["Scan"])
 
@@ -72,6 +77,7 @@ async def upload_and_process(
     nmap_format: Optional[str] = Form(None),
     # Asset criticality per scan session
     asset_criticality: str = Form("unknown"),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Upload scan results for one or more tools.
@@ -102,7 +108,7 @@ async def upload_and_process(
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Provide at least one scanner result.")
 
-    return EventSourceResponse(run_pipeline_sse(files))
+    return EventSourceResponse(run_pipeline_sse(files, user_id=current_user["id"]))
 
 
 @router.post("/process", response_model=ScanSession)
@@ -116,6 +122,7 @@ async def process_sync(
     nmap_file: Optional[UploadFile] = File(None),
     nmap_format: Optional[str] = Form(None),
     asset_criticality: str = Form("unknown"),
+    current_user: dict = Depends(get_current_user),
 ):
     """Synchronous version — returns ScanSession JSON directly (no SSE)."""
     files = []
@@ -129,4 +136,9 @@ async def process_sync(
                        "criticality": asset_criticality})
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
-    return run_pipeline(files)
+    session = run_pipeline(files)
+    try:
+        save_scan_session(session, current_user["id"])
+    except Exception as e:
+        log.error(f"Failed to persist scan session {session.session_id}: {e}")
+    return session
