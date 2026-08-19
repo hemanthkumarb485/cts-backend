@@ -40,7 +40,7 @@ def _fuzzy_key(finding: CanonicalFinding) -> str:
         finding.asset.ip or finding.asset.hostname or
         finding.asset.domain or finding.asset.url or ""
     )
-    return f"{finding.vulnerability_name.lower().strip()}|{host.lower().strip()}"
+    return f"{finding.vulnerability_name.lower().strip()} | {host.lower().strip()}"
 
 
 def deduplicate(findings: List[CanonicalFinding]) -> List[CanonicalFinding]:
