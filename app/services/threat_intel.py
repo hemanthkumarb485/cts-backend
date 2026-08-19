@@ -65,7 +65,24 @@ def fetch_epss_batch(cve_ids):
     try:
         r = requests.get(EPSS_API_URL, params={"cve": ",".join(cve_ids)}, timeout=EPSS_TIMEOUT)
         r.raise_for_status()
-        return {d["cve"].upper(): float(d["epss"]) for d in r.json().get("data", [])}
+        data = r.json().get("data", [])
+        result = {}
+        for d in data:
+            cve = d["cve"].upper()
+            try:
+                epss = float(d["epss"])
+            except (ValueError, TypeError):
+                epss = 0.0
+            try:
+                percentile = float(d["percentile"]) if d.get("percentile") is not None else None
+            except (ValueError, TypeError):
+                percentile = None
+            result[cve] = {
+                "score": epss,
+                "percentile": percentile,
+                "date": d.get("date")
+            }
+        return result
     except Exception: return {}
 
 def _fetch_nvd_single(cve_id):
@@ -120,9 +137,16 @@ def enrich_findings(findings: List[CanonicalFinding]) -> List[CanonicalFinding]:
             ti.kev_date_added = kev.get("dateAdded")
             ti.kev_due_date = kev.get("dueDate")
             ti.kev_ransomware_use = kev.get("knownRansomwareCampaignUse")
-        epss_val = epss_map.get(cve.upper())
-        ti.epss_score = epss_val if epss_val is not None else 0.0
-        if epss_val is None: errors.append("EPSS: defaulted 0.0")
+        epss_data = epss_map.get(cve.upper())
+        epss_val = epss_data.get("score") if epss_data else None
+        if epss_data:
+            score_val = epss_data.get("score", 0.0)
+            ti.epss_score = score_val if score_val > 0.0 else 0.0000001
+            ti.epss_percentile = epss_data.get("percentile")
+            ti.epss_date = epss_data.get("date")
+        else:
+            ti.epss_score = 0.0000001
+            errors.append("EPSS: defaulted 0.0")
         has_exploit, exploits = check_exploitdb(cve)
         ti.has_public_exploit = has_exploit
         if has_exploit:
@@ -133,6 +157,13 @@ def enrich_findings(findings: List[CanonicalFinding]) -> List[CanonicalFinding]:
             ti.nvd_description = nvd.get("description")
             ti.nvd_cvss_score = nvd.get("cvss_score")
             ti.nvd_cvss_severity = nvd.get("cvss_severity")
+            if (not finding.cvss or finding.cvss.base_score is None) and ti.nvd_cvss_score is not None:
+                from app.schemas.canonical import CVSSSchema
+                finding.cvss = CVSSSchema(
+                    base_score=ti.nvd_cvss_score,
+                    version="3.1",
+                    severity_normalized=finding.severity
+                )
         else:
             errors.append("NVD: no data")
         if errors:

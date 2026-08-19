@@ -6,7 +6,7 @@ findings the user reported as UNSCORED.
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
-from app.services.risk_engine import score_finding, CWE_RISK_MAP
+from app.services.risk_engine import score_finding
 from app.schemas.canonical import (
     CanonicalFinding, AssetSchema, SourceTool, SourceFormat,
     NormalizedSeverity, DataCompleteness, PriorityTier
@@ -46,10 +46,10 @@ for name, cwe, sev, expected_tier in TEST_CASES:
     score_str = f"{rs.final_score:.1f}" if rs.final_score is not None else "N/A"
     tier = rs.priority_tier.value if rs.priority_tier else "UNSCORED"
     method = rs.scoring_method or "?"
-    status = "✅" if tier == expected_tier else f"❌ (expected {expected_tier})"
+    status = "[PASS]" if tier == expected_tier else f"[FAIL] (expected {expected_tier})"
     if tier != expected_tier:
         all_pass = False
     print(f"{name:<45} {str(cwe):<10} {score_str:>6}  {tier:<8} {method}  {status}")
 
 print("=" * 70)
-print("ALL PASS ✅" if all_pass else "SOME FAILED ❌")
+print("ALL PASS" if all_pass else "SOME FAILED")
