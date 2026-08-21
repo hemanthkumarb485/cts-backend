@@ -97,16 +97,114 @@ def get_sessions(user_id: str) -> List[Dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id AS session_id, scan_date, uploaded_files, tools_detected,
-                       total_raw_findings, total_after_dedup, total_after_fp_filter,
-                       total_scored, total_unscored, processing_time_seconds, created_at
-                FROM scan_sessions
+                SELECT s.id AS session_id, s.scan_date, s.uploaded_files, s.tools_detected,
+                       s.total_raw_findings, s.total_after_dedup, s.total_after_fp_filter,
+                       s.total_scored, s.total_unscored, s.processing_time_seconds,
+                       s.report_generated_at, s.created_at,
+                       (
+                           SELECT r.id FROM reports r
+                           WHERE r.session_id = s.id
+                           ORDER BY r.created_at DESC
+                           LIMIT 1
+                       ) AS report_id
+                FROM scan_sessions s
+                WHERE s.user_id = %s
+                ORDER BY s.created_at DESC
+                """,
+                (user_id,),
+            )
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def mark_report_generated(session: ScanSession, user_id: str) -> None:
+    """Records when a PDF report was generated for a session — independent
+    of whether "Store Report" was ever clicked for it, and safe regardless
+    of ordering: upserts a bare scan_sessions row (session metadata only, no
+    findings/risk_scores) if one doesn't already exist yet, so the timestamp
+    shows up in Session History either way. If "Store Report" is clicked
+    later, its own INSERT still runs (ON CONFLICT DO NOTHING only skips the
+    session_sessions row itself) and findings/risk_scores get populated as
+    normal."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO scan_sessions
+                    (id, user_id, scan_date, uploaded_files, tools_detected,
+                     total_raw_findings, total_after_dedup, total_after_fp_filter,
+                     total_scored, total_unscored, processing_time_seconds, report_generated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (id) DO UPDATE SET report_generated_at = now()
+                """,
+                (
+                    session.session_id, user_id, session.scan_date,
+                    json.dumps(session.uploaded_files), json.dumps(session.tools_detected),
+                    session.total_raw_findings, session.total_after_dedup,
+                    session.total_after_fp_filter, session.total_scored,
+                    session.total_unscored, session.processing_time_seconds,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def save_report_record(user_id: str, session_id: str, file_name: str, storage_path: str, report_type: str = "pdf") -> str:
+    """Indexes a report already uploaded to Supabase Storage. Returns the new report id."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reports (user_id, session_id, file_name, storage_path, report_type)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (user_id, session_id, file_name, storage_path, report_type),
+            )
+            report_id = cur.fetchone()["id"]
+        conn.commit()
+        return report_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_reports(user_id: str) -> List[Dict[str, Any]]:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id AS report_id, session_id, file_name, storage_path, report_type, created_at
+                FROM reports
                 WHERE user_id = %s
                 ORDER BY created_at DESC
                 """,
                 (user_id,),
             )
             return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def get_report(user_id: str, report_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id AS report_id, storage_path, file_name FROM reports WHERE user_id = %s AND id = %s",
+                (user_id, report_id),
+            )
+            return cur.fetchone()
     finally:
         conn.close()
 
@@ -152,12 +250,35 @@ def get_target_findings(user_id: str, host: str) -> List[Dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT data FROM findings
+                SELECT finding_id, created_at, data FROM findings
                 WHERE user_id = %s AND asset_host = %s
                 ORDER BY created_at DESC
                 """,
                 (user_id, host),
             )
-            return [row["data"] for row in cur.fetchall()]
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def get_finding_by_id(user_id: str, finding_id: str) -> Optional[Dict[str, Any]]:
+    """Look up a single persisted finding by its pipeline finding_id — used
+    as a fallback by the finding detail page when the finding isn't in the
+    caller's current in-memory scan session (e.g. reached via Targets, which
+    aggregates across all past sessions, not just the active one)."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT data FROM findings
+                WHERE user_id = %s AND finding_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user_id, finding_id),
+            )
+            row = cur.fetchone()
+            return row["data"] if row else None
     finally:
         conn.close()

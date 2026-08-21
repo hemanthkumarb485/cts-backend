@@ -72,3 +72,17 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     token = authorization.split(" ", 1)[1].strip()
     payload = verify_supabase_jwt(token)
     return {"id": payload["sub"], "email": payload.get("email")}
+
+
+async def get_current_user_optional(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """Like get_current_user, but returns None instead of 401 when there's no
+    (or an invalid) token — for endpoints that work anonymously but do
+    something extra when the caller happens to be logged in."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        payload = verify_supabase_jwt(token)
+    except HTTPException:
+        return None
+    return {"id": payload["sub"], "email": payload.get("email")}

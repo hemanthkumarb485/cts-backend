@@ -17,10 +17,15 @@ DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
 # app/core/security.py) — no shared JWT secret needs to be stored here.
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+# The publishable/anon key — safe to be public, required as the `apikey`
+# header on Supabase Storage REST calls (see app/services/storage_service.py).
+# We upload/download as the calling user via their own JWT, not this key —
+# this just identifies the project, it never bypasses Storage RLS.
+SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
 
-# --- Anthropic (remediation suggestions / ticket description enhancement) ---
-ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+# --- Groq (remediation suggestions / ticket description enhancement) ---
+GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # --- NVD API ---
 NVD_API_KEY: str = os.getenv("NVD_API_KEY", "")

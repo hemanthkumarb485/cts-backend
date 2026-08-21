@@ -7,6 +7,9 @@ from app.api.v1.endpoints.github import router as github_router
 from app.api.v1.endpoints.report import router as report_router
 from app.api.v1.endpoints.targets import router as targets_router
 from app.api.v1.endpoints.remediation import router as remediation_router
+from app.api.v1.endpoints.findings import router as findings_router
+from app.api.v1.endpoints.sessions import router as sessions_router
+from app.api.v1.endpoints.reports import router as reports_router
 
 api_router = APIRouter()
 api_router.include_router(scan_router)
@@ -14,3 +17,6 @@ api_router.include_router(github_router)
 api_router.include_router(report_router)
 api_router.include_router(targets_router)
 api_router.include_router(remediation_router)
+api_router.include_router(findings_router)
+api_router.include_router(sessions_router)
+api_router.include_router(reports_router)

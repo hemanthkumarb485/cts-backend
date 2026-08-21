@@ -26,8 +26,11 @@ PARSER_MAP = {"zap": parse_zap, "nuclei": parse_nuclei,
 
 def run_pipeline(files: List[Dict[str, Any]]) -> ScanSession:
     t0 = time.time()
-    from datetime import datetime
-    scan_time = datetime.now().isoformat()
+    from datetime import datetime, timezone
+    # timezone-aware UTC, not naive local time — a naive timestamp here gets
+    # silently misinterpreted as UTC by Postgres's timestamptz column,
+    # shifting every stored scan_date by the server's real UTC offset.
+    scan_time = datetime.now(timezone.utc).isoformat()
     session = ScanSession(session_id=str(uuid.uuid4()), scan_date=scan_time)
     all_findings: List[CanonicalFinding] = []
     log.info(f"START session={session.session_id[:8]} files={len(files)}")
@@ -78,7 +81,7 @@ def run_pipeline(files: List[Dict[str, Any]]) -> ScanSession:
 
 
 
-async def run_pipeline_sse(files: List[Dict[str, Any]], user_id: str = None) -> AsyncGenerator[str, None]:
+async def run_pipeline_sse(files: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
     """
     SSE generator for /scan/upload endpoint.
 
@@ -131,12 +134,5 @@ async def run_pipeline_sse(files: List[Dict[str, Any]], user_id: str = None) -> 
     yield event("scoring", 98, f"Scoring complete - {session.total_scored} scored")
     await asyncio.sleep(0)
     session.processing_time_seconds = elapsed()
-
-    if user_id:
-        try:
-            from app.services.persistence_service import save_scan_session
-            save_scan_session(session, user_id)
-        except Exception as e:
-            log.error(f"Failed to persist scan session {session.session_id}: {e}")
 
     yield event("complete", 100, "Pipeline complete!", data=session.model_dump())

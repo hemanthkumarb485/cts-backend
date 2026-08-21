@@ -2,6 +2,11 @@
 scan.py — /api/v1/scan endpoints.
 POST /upload      → Upload files per-tool, returns SSE stream with progress + final JSON
 POST /process     → Synchronous process (for testing)
+POST /store       → Persist an already-computed ScanSession to the caller's account
+
+Scanning itself (/upload, /process) requires NO login — anyone can run a
+scan and see results. Only /store (saving that session to Supabase for
+later, e.g. in the Targets tab / report history) requires auth.
 """
 from __future__ import annotations
 import json
@@ -77,10 +82,9 @@ async def upload_and_process(
     nmap_format: Optional[str] = Form(None),
     # Asset criticality per scan session
     asset_criticality: str = Form("unknown"),
-    current_user: dict = Depends(get_current_user),
 ):
     """
-    Upload scan results for one or more tools.
+    Upload scan results for one or more tools. No login required.
     Returns an SSE stream with real-time progress updates.
     Final event contains the complete ScanSession JSON.
     """
@@ -108,7 +112,7 @@ async def upload_and_process(
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded. Provide at least one scanner result.")
 
-    return EventSourceResponse(run_pipeline_sse(files, user_id=current_user["id"]))
+    return EventSourceResponse(run_pipeline_sse(files))
 
 
 @router.post("/process", response_model=ScanSession)
@@ -122,9 +126,8 @@ async def process_sync(
     nmap_file: Optional[UploadFile] = File(None),
     nmap_format: Optional[str] = Form(None),
     asset_criticality: str = Form("unknown"),
-    current_user: dict = Depends(get_current_user),
 ):
-    """Synchronous version — returns ScanSession JSON directly (no SSE)."""
+    """Synchronous version — returns ScanSession JSON directly (no SSE). No login required."""
     files = []
     pairs = [("zap", zap_file, zap_format), ("nuclei", nuclei_file, nuclei_format),
              ("openvas", openvas_file, openvas_format), ("nmap", nmap_file, nmap_format)]
@@ -136,9 +139,18 @@ async def process_sync(
                        "criticality": asset_criticality})
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
-    session = run_pipeline(files)
+    return run_pipeline(files)
+
+
+@router.post("/store")
+async def store_session(session: ScanSession, current_user: dict = Depends(get_current_user)):
+    """
+    Persist an already-computed ScanSession (from /upload or /process) to
+    the caller's Supabase account — the "Store Report" action. Requires
+    login; the scan itself does not.
+    """
     try:
         save_scan_session(session, current_user["id"])
     except Exception as e:
-        log.error(f"Failed to persist scan session {session.session_id}: {e}")
-    return session
+        raise HTTPException(status_code=500, detail=f"Failed to store report: {e}")
+    return {"status": "stored", "session_id": session.session_id}

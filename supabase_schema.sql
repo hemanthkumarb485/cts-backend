@@ -22,6 +22,7 @@ create table if not exists scan_sessions (
     total_scored              integer default 0,
     total_unscored            integer default 0,
     processing_time_seconds   numeric,
+    report_generated_at       timestamptz,
     created_at                timestamptz not null default now()
 );
 
@@ -174,3 +175,38 @@ create policy "own github_issues" on github_issues
             where c.id = github_issues.connection_id and c.app_user_id = auth.uid()
         )
     );
+
+-- ─── Generated report files (Supabase Storage) ─────────────────────────────
+-- The PDF bytes live in Storage (private "reports" bucket, one folder per
+-- user), never in a Postgres column. This table is just the metadata index.
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('reports', 'reports', false, 20971520, array['application/pdf'])
+on conflict (id) do nothing;
+
+-- Postgres has no "CREATE POLICY IF NOT EXISTS" — this file (like the rest
+-- of it) is written to run once against a fresh project.
+create policy reports_insert_own on storage.objects for insert
+    with check (bucket_id = 'reports' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy reports_select_own on storage.objects for select
+    using (bucket_id = 'reports' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy reports_delete_own on storage.objects for delete
+    using (bucket_id = 'reports' and (storage.foldername(name))[1] = auth.uid()::text);
+
+create table if not exists reports (
+    id            uuid primary key default gen_random_uuid(),
+    user_id       uuid not null references auth.users(id) on delete cascade,
+    session_id    uuid references scan_sessions(id) on delete set null,
+    file_name     text not null,
+    storage_path  text not null,
+    report_type   text not null default 'pdf',
+    created_at    timestamptz not null default now()
+);
+
+create index if not exists idx_reports_user_id on reports(user_id);
+create index if not exists idx_reports_session_id on reports(session_id);
+
+alter table reports enable row level security;
+
+create policy "own reports" on reports
+    for all using (user_id = auth.uid());

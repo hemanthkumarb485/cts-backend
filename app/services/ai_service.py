@@ -1,56 +1,60 @@
 """
-ai_service.py — Anthropic Claude wrapper for the AI-assisted features:
+ai_service.py — Groq wrapper for the AI-assisted features:
   1. suggest_remediation()      — Finding detail page "Get AI Remediation" button
   2. enhance_ticket_description() — Ticket composer "Enhance with AI" button
-  3. generate_overview()        — Finding detail page "Get AI Overview" button
-     (only really needed for CVE-less/CWE-only findings, where there's no NVD
-     description to fall back to and the scanner's own text is a generic
-     one-liner like "SQL injection may be possible.")
+  3. generate_overview()        — Finding detail page Overview section.
+     Always AI-generated (fetched automatically on page load) rather than
+     showing the scanner's raw description verbatim — raw scanner/NVD text
+     is thin ("SQL injection may be possible.") or generic boilerplate, so
+     it's fed in as source material for the model to analyze and rewrite,
+     not shown directly.
+
+Note: the default model (openai/gpt-oss-120b) is a reasoning model — it
+spends part of the token budget on an internal "reasoning" field before
+producing the final answer, so max_tokens per call is set generously higher
+than the target reply length to avoid truncating the answer to nothing.
 """
 from __future__ import annotations
 from typing import Optional
-import anthropic
+import groq
 
-from app.core.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
+from app.core.config import GROQ_API_KEY, GROQ_MODEL
 from app.schemas.canonical import CanonicalFinding
 
-_client: Optional[anthropic.Anthropic] = None
+_client: Optional[groq.Groq] = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> groq.Groq:
     global _client
     if _client is None:
-        if not ANTHROPIC_API_KEY:
-            raise RuntimeError("ANTHROPIC_API_KEY is not configured")
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY is not configured")
+        _client = groq.Groq(api_key=GROQ_API_KEY)
     return _client
 
 
-def _call_claude(prompt: str, max_tokens: int) -> str:
-    """Calls Claude and turns SDK errors into a short, user-facing message
-    instead of leaking the raw Anthropic error payload to the frontend."""
+def _call_llm(prompt: str, max_tokens: int) -> str:
+    """Calls Groq and turns SDK errors into a short, user-facing message
+    instead of leaking the raw API error payload to the frontend."""
     try:
-        resp = _get_client().messages.create(
-            model=ANTHROPIC_MODEL,
+        resp = _get_client().chat.completions.create(
+            model=GROQ_MODEL,
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
-        return resp.content[0].text.strip()
-    except anthropic.APIStatusError as e:
+        return (resp.choices[0].message.content or "").strip()
+    except groq.APIStatusError as e:
         body_msg = None
         if isinstance(e.body, dict):
             body_msg = e.body.get("error", {}).get("message")
         msg = body_msg or str(e)
-        if "credit balance" in msg.lower():
-            raise RuntimeError(
-                "Anthropic account has no credit balance. Add credits at "
-                "console.anthropic.com/settings/billing to enable AI features."
-            ) from e
         if e.status_code == 401:
-            raise RuntimeError("Anthropic API key is invalid. Check ANTHROPIC_API_KEY.") from e
-        raise RuntimeError(f"Anthropic API error: {msg}") from e
-    except anthropic.APIConnectionError as e:
-        raise RuntimeError("Could not reach the Anthropic API — check network connectivity.") from e
+            raise RuntimeError("Groq API key is invalid. Check GROQ_API_KEY.") from e
+        if e.status_code == 429 or "quota" in msg.lower() or "rate limit" in msg.lower():
+            raise RuntimeError("Groq rate limit or quota reached — try again in a moment.") from e
+        raise RuntimeError(f"Groq API error: {msg}") from e
+    except groq.APIConnectionError as e:
+        raise RuntimeError("Could not reach the Groq API — check network connectivity.") from e
 
 
 def _finding_context(finding: CanonicalFinding) -> str:
@@ -95,14 +99,18 @@ def _finding_context(finding: CanonicalFinding) -> str:
 def generate_overview(finding: CanonicalFinding) -> str:
     prompt = (
         "You are a security analyst explaining a vulnerability finding to someone triaging it. "
-        "Using only the facts given below, write a concise, specific 2-4 sentence overview of what "
-        "this finding actually is and why it matters for this particular asset — not a generic "
-        "definition of the vulnerability class. Ground every claim in the facts below; do not "
-        "invent CVEs, scores, or details not present. If the facts are thin, say what's known "
-        "plainly rather than padding with generic advice.\n\n"
+        "Below is the raw finding data, including the scanner's own (often generic or boilerplate) "
+        "description. Analyze it and write a clear, specific overview of what this finding actually "
+        "is and why it matters for this particular asset — do not just repeat the scanner text "
+        "verbatim, rewrite and explain it in your own words.\n\n"
+        "Format: exactly two paragraphs, separated by a blank line, each about 5 sentences long. "
+        "First paragraph: what the vulnerability is and how it manifests here. Second paragraph: "
+        "why it matters — impact and risk in context (asset criticality, exposure, any exploit/KEV "
+        "signals given). Ground every claim in the facts below; do not invent CVEs, scores, or "
+        "details not present. Plain prose, no markdown headers or bullet points.\n\n"
         f"{_finding_context(finding)}"
     )
-    return _call_claude(prompt, max_tokens=300)
+    return _call_llm(prompt, max_tokens=900)
 
 
 def suggest_remediation(finding: CanonicalFinding) -> str:
@@ -114,7 +122,7 @@ def suggest_remediation(finding: CanonicalFinding) -> str:
         "Keep it under 200 words, formatted as short paragraphs or a brief numbered list.\n\n"
         f"{_finding_context(finding)}"
     )
-    return _call_claude(prompt, max_tokens=500)
+    return _call_llm(prompt, max_tokens=1024)
 
 
 def enhance_ticket_description(finding: CanonicalFinding, current_description: Optional[str]) -> str:
@@ -128,4 +136,4 @@ def enhance_ticket_description(finding: CanonicalFinding, current_description: O
         f"{_finding_context(finding)}\n\n"
         f"Current description: {current_description or '(none provided)'}"
     )
-    return _call_claude(prompt, max_tokens=400)
+    return _call_llm(prompt, max_tokens=900)

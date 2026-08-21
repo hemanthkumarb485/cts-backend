@@ -6,12 +6,40 @@ POST /export/pdf  → Generates PDF report using PyMuPDF/ReportLab
 from __future__ import annotations
 import json
 import io
+import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.schemas.canonical import ScanSession, CanonicalFinding, PriorityTier
+from app.core.security import get_current_user_optional
+from app.services.persistence_service import mark_report_generated, save_report_record
+from app.services.storage_service import upload_pdf
+
+log = logging.getLogger("report_endpoint")
 
 router = APIRouter(prefix="/report", tags=["Report"])
+
+
+def _compress_pdf(pdf_bytes: bytes) -> bytes:
+    """Losslessly recompresses a PDF via PyMuPDF (already a dependency —
+    used elsewhere for PDF text extraction) before it's stored/downloaded:
+    max garbage collection to drop unused/duplicate objects, deflate to
+    recompress content streams and embedded fonts. Reports have no images,
+    so nothing is rasterized/downsampled — just structural fat trimmed.
+    Falls back to the original bytes if compression fails for any reason,
+    so a PyMuPDF hiccup never blocks the user from getting their report."""
+    try:
+        import pymupdf
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        out = doc.tobytes(garbage=4, deflate=True, deflate_fonts=True, clean=True)
+        doc.close()
+        before_kb, after_kb = len(pdf_bytes) / 1024, len(out) / 1024
+        log.info(f"PDF compressed: {before_kb:.1f} KB -> {after_kb:.1f} KB "
+                  f"({(1 - after_kb / before_kb) * 100:.0f}% smaller)" if before_kb else "PDF compressed")
+        return out
+    except Exception as e:
+        log.error(f"PDF compression failed, using uncompressed bytes: {e}")
+        return pdf_bytes
 
 
 @router.post("/export/json")
@@ -48,8 +76,15 @@ async def export_json(session: ScanSession):
 
 
 @router.post("/export/pdf")
-async def export_pdf(session: ScanSession):
-    """Generate and return a PDF report from a ScanSession."""
+async def export_pdf(
+    session: ScanSession,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+    authorization: Optional[str] = Header(None),
+):
+    """Generate and return a PDF report from a ScanSession. Works anonymously;
+    if the caller is logged in, the PDF is also uploaded to their private
+    Supabase Storage folder and indexed in `reports` so it can be re-downloaded
+    later from Session History."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
@@ -158,9 +193,26 @@ async def export_pdf(session: ScanSession):
         story.append(Spacer(1, 0.3*cm))
 
     doc.build(story)
-    buffer.seek(0)
+    pdf_bytes = _compress_pdf(buffer.getvalue())
+
+    if current_user and authorization:
+        try:
+            user_jwt = authorization.split(" ", 1)[1].strip()
+            file_name = f"{session.session_id}.pdf"
+            # Ensure the scan_sessions row exists (upserts a bare one if
+            # "Store Report" was never clicked) BEFORE save_report_record,
+            # since reports.session_id has a foreign key on scan_sessions —
+            # PDF download must work standalone, independent of Store Report.
+            mark_report_generated(session, current_user["id"])
+            storage_path = upload_pdf(user_jwt, current_user["id"], file_name, pdf_bytes)
+            save_report_record(current_user["id"], session.session_id, file_name, storage_path)
+        except Exception as e:
+            # Best-effort — the caller still gets their PDF even if the
+            # Storage upload/index step fails for some reason.
+            log.error(f"Failed to store report for session {session.session_id}: {e}")
+
     return StreamingResponse(
-        buffer,
+        io.BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=vulnerax_report.pdf"},
     )

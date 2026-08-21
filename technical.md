@@ -1,6 +1,10 @@
 # Backend Technical Flow Analysis
 
-This backend is a stateless vulnerability ingestion pipeline for four scanner families: ZAP, Nuclei, OpenVAS, and Nmap. Each input is parsed into a raw record dictionary, normalized into the shared CanonicalFinding schema, then processed through deduplication, false-positive filters, threat intel enrichment, and risk scoring before returning a ScanSession payload.
+> For the full-project picture (frontend, auth, database, AI features, API
+> reference) see [`../TECHNICAL.md`](../TECHNICAL.md). This file is a deep
+> dive on the scan pipeline specifically.
+
+This backend ingests output from four scanner families — ZAP, Nuclei, OpenVAS, and Nmap. Each input is parsed into a raw record dictionary, normalized into the shared CanonicalFinding schema, then processed through deduplication, false-positive filters, threat intel enrichment, and risk scoring before returning a ScanSession payload, which is then persisted to Supabase Postgres for the calling user.
 
 ## High-level architecture
 
@@ -532,7 +536,8 @@ The deduplication logic is in [app/services/deduplication.py](app/services/dedup
 ### Strategy
 
 1. Exact deduplication by compute_dedup_key
-2. Fuzzy deduplication by vulnerability name + host similarity
+2. Fuzzy deduplication by vulnerability name + host similarity (RapidFuzz, threshold 88)
+3. Semantic deduplication by TF-IDF cosine similarity over name + description (threshold 0.85) — catches reworded duplicates the fuzzy pass misses
 
 The dedup key is computed inside [app/schemas/canonical.py](app/schemas/canonical.py):
 
@@ -618,12 +623,15 @@ The logic is hierarchical:
 
 Used when finding.cve_id exists.
 
-Formula:
+Formula (weighted by exploitation-signal strength, not raw severity):
 
-- CVSS x 0.40
-- KEV x 0.25
-- EPSS x 0.20
+- KEV x 0.35
+- EPSS x 0.25
 - ExploitDB x 0.15
+- GitHub PoC x 0.15
+- CVSS x 0.10
+
+P0 requires score >= 70 **and** at least one of KEV / EPSS >= 0.5 / ExploitDB / GitHub PoC — score alone never triggers P0.
 
 Then it applies asset criticality multiplier:
 
