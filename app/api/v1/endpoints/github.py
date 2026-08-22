@@ -3,7 +3,6 @@ github.py — GitHub OAuth + Issues API endpoints.
 Tokens stored encrypted in Supabase Postgres. Issues tracked there too.
 """
 from __future__ import annotations
-from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import RedirectResponse
 
@@ -14,20 +13,14 @@ from app.services.github_service import (
     get_github_scopes, list_user_repos, create_github_issue, _encrypt, _decrypt,
     save_github_connection,
 )
-from app.schemas.canonical import CreateIssueRequest, CreateIssueResponse, CanonicalFinding
+from app.schemas.canonical import CreateIssueRequest, CreateIssueResponse
 from app.core.security import get_current_user
-from app.services.ai_service import enhance_ticket_description
 
 router = APIRouter(prefix="/github", tags=["GitHub"])
 
 
 class ConnectPATRequest(BaseModel):
     pat: str
-
-
-class EnhanceDescriptionRequest(BaseModel):
-    finding_data: CanonicalFinding
-    current_description: Optional[str] = None
 
 
 # ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -208,18 +201,6 @@ async def get_repositories(encrypted_token: str = Query(...), current_user: dict
             for r in repos
         ]
     }
-
-
-# ─── Ticket description enhancer ───────────────────────────────────────────────
-
-@router.post("/tickets/enhance-description")
-async def enhance_description(req: EnhanceDescriptionRequest, current_user: dict = Depends(get_current_user)):
-    """Rewrite/expand a ticket description with Claude before issue creation."""
-    try:
-        description = enhance_ticket_description(req.finding_data, req.current_description)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    return {"description": description}
 
 
 # ─── Create Issue ─────────────────────────────────────────────────────────────

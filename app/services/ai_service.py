@@ -1,8 +1,11 @@
 """
 ai_service.py — Groq wrapper for the AI-assisted features:
-  1. suggest_remediation()      — Finding detail page "Get AI Remediation" button
-  2. enhance_ticket_description() — Ticket composer "Enhance with AI" button
-  3. generate_overview()        — Finding detail page Overview section.
+  1. suggest_remediation()      — Finding detail page "Get AI Remediation"
+     button, and reused by the ticket composer's "Enhance with AI" button
+     (which enhances the ticket's Remediation field, not its Description —
+     the Description doesn't need its own AI pass since the Overview below
+     already is the AI-analyzed version of the scanner's raw text).
+  2. generate_overview()        — Finding detail page Overview section.
      Always AI-generated (fetched automatically on page load) rather than
      showing the scanner's raw description verbatim — raw scanner/NVD text
      is thin ("SQL injection may be possible.") or generic boilerplate, so
@@ -123,17 +126,3 @@ def suggest_remediation(finding: CanonicalFinding) -> str:
         f"{_finding_context(finding)}"
     )
     return _call_llm(prompt, max_tokens=1024)
-
-
-def enhance_ticket_description(finding: CanonicalFinding, current_description: Optional[str]) -> str:
-    prompt = (
-        "You are writing a clear, developer-actionable GitHub issue description for a security "
-        "vulnerability. Rewrite/expand the description below (or draft one from the finding data "
-        "if it's thin) so a developer unfamiliar with the finding understands: what the "
-        "vulnerability is, why it matters, and what's affected. Ground it only in the facts given "
-        "below — do not invent details. Keep it under 180 words, plain prose (no markdown headers — "
-        "the surrounding issue template already has those).\n\n"
-        f"{_finding_context(finding)}\n\n"
-        f"Current description: {current_description or '(none provided)'}"
-    )
-    return _call_llm(prompt, max_tokens=900)

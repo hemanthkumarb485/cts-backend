@@ -340,6 +340,7 @@ class CreateIssueRequest(BaseModel):
     )
     milestone: Optional[str] = None
     custom_description: Optional[str] = None
+    custom_remediation: Optional[str] = None
 
 
 class CreateIssueResponse(BaseModel):

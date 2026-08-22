@@ -106,7 +106,17 @@ def get_sessions(user_id: str) -> List[Dict[str, Any]]:
                            WHERE r.session_id = s.id
                            ORDER BY r.created_at DESC
                            LIMIT 1
-                       ) AS report_id
+                       ) AS report_id,
+                       -- A scan_sessions row alone doesn't mean "Store Report"
+                       -- was ever clicked: generating a PDF also upserts a
+                       -- bare metadata-only row here (see mark_report_generated)
+                       -- so the session shows up in History with a finding
+                       -- count even though nothing was written to `findings`.
+                       -- Targets only reads from `findings`, so surface
+                       -- whether this session actually has any.
+                       EXISTS (
+                           SELECT 1 FROM findings f WHERE f.session_id = s.id
+                       ) AS has_findings
                 FROM scan_sessions s
                 WHERE s.user_id = %s
                 ORDER BY s.created_at DESC

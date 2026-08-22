@@ -86,7 +86,8 @@ def list_user_repos(token: str) -> List[dict]:
     return repos
 
 
-def build_issue_body(finding: CanonicalFinding, custom_description: Optional[str] = None) -> str:
+def build_issue_body(finding: CanonicalFinding, custom_description: Optional[str] = None,
+                      custom_remediation: Optional[str] = None) -> str:
     ti = finding.threat_intel
     risk = finding.risk_score
     asset = finding.asset
@@ -159,8 +160,9 @@ def build_issue_body(finding: CanonicalFinding, custom_description: Optional[str
                 f"Final score: {f1(risk.final_score)}/100",
                 "",
             ]
-    if finding.solution:
-        lines += ["### 🔧 Remediation", "", finding.solution, ""]
+    remediation = custom_remediation or finding.solution
+    if remediation:
+        lines += ["### 🔧 Remediation", "", remediation, ""]
     if finding.evidence:
         lines += ["### 🔍 Evidence", "", f"```\n{finding.evidence}\n```", ""]
     if finding.references:
@@ -196,7 +198,7 @@ def create_github_issue(token: str, req: CreateIssueRequest) -> CreateIssueRespo
     tier = finding.risk_score.priority_tier.value if finding.risk_score else "VULN"
     host = finding.asset.hostname or finding.asset.ip or "Unknown"
     title = f"[{tier}] {finding.vulnerability_name} — {host}"
-    payload = {"title": title, "body": build_issue_body(finding, req.custom_description),
+    payload = {"title": title, "body": build_issue_body(finding, req.custom_description, req.custom_remediation),
                "labels": req.labels or ["security", "vulnerability"]}
     if req.assignee: payload["assignees"] = [req.assignee]
     resp = requests.post(f"{GITHUB_API_BASE}/repos/{req.repo_full_name}/issues",
