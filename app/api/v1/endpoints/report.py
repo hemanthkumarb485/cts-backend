@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as _xml_escape
-from fastapi import APIRouter, HTTPException, Depends, Header
+from zoneinfo import ZoneInfo
+from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.schemas.canonical import ScanSession, CanonicalFinding, PriorityTier
 from app.core.config import GROQ_API_KEY
@@ -146,62 +147,81 @@ def _parse_dt(raw: Optional[str]):
         return None
 
 
-def _format_scan_date(raw: Optional[str], fmt: str = "%d:%m:%Y-%H:%M:%S") -> Optional[str]:
+def _resolve_tz(tz_name: Optional[str]) -> timezone:
+    """Resolves an IANA timezone name (e.g. "Asia/Kolkata", sent by the
+    frontend via Intl.DateTimeFormat().resolvedOptions().timeZone) to a
+    tzinfo — timestamps are stored/computed in UTC throughout, but a report
+    is a human-facing document: showing UTC while the viewer's own clock
+    reads local time forces a manual timezone conversion on every read,
+    which reads as "the timestamps are wrong" even though they're
+    internally consistent. Falls back to UTC for a missing/invalid name
+    rather than failing the whole export over a display preference."""
+    if not tz_name:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone.utc
+
+
+def _format_scan_date(raw: Optional[str], fmt: str = "%d:%m:%Y-%H:%M:%S", tz: Optional[timezone] = None) -> Optional[str]:
     dt = _parse_dt(raw)
-    return dt.strftime(fmt) if dt else None
+    if not dt:
+        return None
+    if tz is not None:
+        dt = dt.astimezone(tz)
+    return dt.strftime(fmt)
+
+
+# The app's actual logo mark (frontend/public/favicon.svg — the shield-
+# exclamation icon shown in the sidebar and browser tab), embedded verbatim
+# rather than referencing the frontend's file path: the backend shouldn't
+# depend on a sibling directory existing at a fixed relative location in
+# every deployment, and this guarantees the PDF always matches the source
+# asset exactly rather than a hand-approximated redrawing of it.
+_LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"
+    d="M12 9v3.75m0-10.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.75c0 5.592 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.57-.598-3.75h-.152c-3.196 0-6.1-1.25-8.25-3.286Zm0 13.036h.008v.008H12v-.008Z" />
+</svg>"""
 
 
 def _shield_logo(size: float = 60, color_hex: str = "#18181b"):
-    """VulneraX's actual shield-exclamation mark — the exact Heroicons glyph
-    used in the app sidebar (viewBox 0 0 24 24, stroke-width 1.6):
-        M12 9v3.75m0-10.036A11.959 11.959 0 0 1 3.598 6
-        11.99 11.99 0 0 0 3 9.75c0 5.592 3.824 10.29 9 11.622
-        5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.57-.598-3.75h-.152
-        c-3.196 0-6.1-1.25-8.25-3.286Zm0 13.036h.008v.008H12v-.008Z
-    ReportLab's Path has no SVG-arc primitive, so the two elliptical `A`
-    commands were converted to cubic beziers with the standard endpoint-to-
-    center arc parameterization (computed once, not approximated by eye) —
-    every other point below is a direct, exact transcription of the SVG
-    path data. Coordinates are y-flipped (y' = 24 - y) to go from SVG's
-    top-down space to ReportLab's bottom-up one.
-    """
-    from reportlab.graphics.shapes import Drawing, Group, Path
-    from reportlab.lib.colors import HexColor
+    """Rasterizes the real logo SVG (via PyMuPDF, already a dependency)
+    into a PNG and returns it as a ReportLab Image flowable — rendering the
+    actual asset beats hand-transcribing its path into ReportLab's drawing
+    API, which only ever approximates the source."""
+    import io as _io
+    import pymupdf
+    from reportlab.platypus import Image
 
-    stroke = HexColor(color_hex)
-    d = Drawing(size, size)
-    g = Group()
-    scale = size / 24.0
-    g.transform = (scale, 0, 0, scale, 0, 0)
+    svg = _LOGO_SVG.format(color=color_hex)
+    doc = pymupdf.open(stream=svg.encode("utf-8"), filetype="svg")
+    page = doc[0]
+    scale = 8  # rasterize well above final size, ReportLab downscales cleanly
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=True)
+    png_bytes = pix.tobytes("png")
+    doc.close()
 
-    shield = Path(strokeColor=stroke, strokeWidth=1.6, fillColor=None,
-                  strokeLineJoin=1, strokeLineCap=1)
-    # Subpath 1 — the exclamation mark's stem: M12 9 v3.75
-    shield.moveTo(12, 15)
-    shield.lineTo(12, 11.25)
-    # Subpath 2 — the shield outline (two arcs + four cubic curves + one line, closed)
-    shield.moveTo(12, 21.286)
-    shield.curveTo(9.9228, 19.3134, 6.4624, 17.96, 3.598, 18.0)
-    shield.curveTo(3.2064, 16.8069, 2.9989, 15.5058, 3.0, 14.25)
-    shield.curveTo(3.0, 8.658, 6.824, 3.96, 12.0, 2.628)
-    shield.curveTo(17.176, 3.96, 21.0, 8.658, 21.0, 14.25)
-    shield.curveTo(21.0, 15.56, 20.79, 16.82, 20.402, 18.0)
-    shield.lineTo(20.25, 18.0)
-    shield.curveTo(17.054, 18.0, 14.15, 19.25, 12.0, 21.286)
-    shield.closePath()
-    # Subpath 3 — the exclamation mark's dot: a near-zero square, stroked
-    # thick and round-jointed so it renders as a solid dot (same trick the
-    # source SVG uses).
-    shield.moveTo(12, 8.25)
-    shield.lineTo(12.008, 8.25)
-    shield.lineTo(12.008, 8.242)
-    shield.lineTo(12, 8.242)
-    shield.closePath()
-    g.add(shield)
+    img = Image(_io.BytesIO(png_bytes), width=size, height=size)
+    img.hAlign = "CENTER"
+    return img
 
-    d.add(g)
-    d.hAlign = "CENTER"
-    return d
+
+def _strip_html(text: Optional[str]) -> Optional[str]:
+    """Scanner-supplied prose (ZAP's description/solution especially) is
+    often literal HTML — "<p>SQL injection may be possible.</p>" — which
+    the frontend renders fine but which shows up as literal "<p>" text when
+    used verbatim as a plain-text PDF fallback (AI unavailable/failed).
+    Strips tags and decodes the handful of entities scanners actually use,
+    mirroring the frontend's stripHtml() in utils/helpers.js. Deliberately
+    NOT applied inside _safe() / to evidence-attack fields — a raw
+    "<script>" in an XSS payload is the finding, not markup to clean."""
+    if not text:
+        return text
+    t = re.sub(r"<[^>]+>", " ", text)
+    t = (t.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+           .replace("&quot;", '"').replace("&#39;", "'").replace("&nbsp;", " "))
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def _gather_ai_content(findings: List[CanonicalFinding]) -> Dict[str, Tuple[str, bool, str, bool]]:
@@ -216,8 +236,8 @@ def _gather_ai_content(findings: List[CanonicalFinding]) -> Dict[str, Tuple[str,
     if not GROQ_API_KEY:
         for f in findings:
             results[f.finding_id] = (
-                f.description or "No description provided by the scanner.", False,
-                f.solution or "No remediation guidance provided by the scanner.", False,
+                _strip_html(f.description) or "No description provided by the scanner.", False,
+                _strip_html(f.solution) or "No remediation guidance provided by the scanner.", False,
             )
         return results
 
@@ -227,14 +247,14 @@ def _gather_ai_content(findings: List[CanonicalFinding]) -> Dict[str, Tuple[str,
             overview_ai = True
         except Exception as e:
             log.warning(f"AI overview failed for finding {f.finding_id}: {e}")
-            overview = f.description or "No description provided by the scanner."
+            overview = _strip_html(f.description) or "No description provided by the scanner."
             overview_ai = False
         try:
             remediation = ai_service.suggest_remediation(f)
             remediation_ai = True
         except Exception as e:
             log.warning(f"AI remediation failed for finding {f.finding_id}: {e}")
-            remediation = f.solution or "No remediation guidance provided by the scanner."
+            remediation = _strip_html(f.solution) or "No remediation guidance provided by the scanner."
             remediation_ai = False
         return f.finding_id, overview, overview_ai, remediation, remediation_ai
 
@@ -269,16 +289,16 @@ def _compress_pdf(pdf_bytes: bytes) -> bytes:
 
 
 @router.post("/export/json")
-async def export_json(session: ScanSession):
+async def export_json(session: ScanSession, tz: Optional[str] = Query(None)):
     """Return the ScanSession as a downloadable JSON file."""
     # Both timestamps must share the same clock — session.scan_date is set
-    # server-side as UTC (see pipeline.py), so "now" has to be UTC too, or
-    # the two times in the same report look inconsistent (e.g. generation
-    # appearing hours *after* it should relative to ingestion) depending on
-    # what timezone the backend host happens to be running in.
-    generation_time_str = datetime.now(timezone.utc).strftime("%d:%m:%Y-%H:%M:%S") + " UTC"
-    _scan_fmt = _format_scan_date(session.scan_date)
-    scan_time_str = f"{_scan_fmt} UTC" if _scan_fmt else generation_time_str
+    # server-side as UTC (see pipeline.py). Displayed in the caller's own
+    # timezone (from Intl.DateTimeFormat, passed as ?tz=) when given, since
+    # a UTC-only report forces a manual conversion against the reader's own
+    # clock on every read; falls back to UTC if not provided/invalid.
+    display_tz = _resolve_tz(tz)
+    generation_time_str = datetime.now(display_tz).strftime("%d:%m:%Y-%H:%M:%S %Z")
+    scan_time_str = _format_scan_date(session.scan_date, tz=display_tz, fmt="%d:%m:%Y-%H:%M:%S %Z") or generation_time_str
 
     data = session.model_dump()
     data["report_metadata"] = {
@@ -300,11 +320,20 @@ async def export_pdf(
     session: ScanSession,
     current_user: Optional[dict] = Depends(get_current_user_optional),
     authorization: Optional[str] = Header(None),
+    tz: Optional[str] = Query(None),
 ):
     """Generate and return a PDF report from a ScanSession. Works anonymously;
     if the caller is logged in, the PDF is also uploaded to their private
     Supabase Storage folder and indexed in `reports` so it can be re-downloaded
-    later from Session History."""
+    later from Session History.
+
+    `tz` is the caller's IANA timezone (e.g. "Asia/Kolkata", from
+    Intl.DateTimeFormat().resolvedOptions().timeZone on the frontend) — all
+    timestamps in the PDF are displayed in it instead of UTC, since a report
+    is a human-facing document and showing UTC against the reader's own
+    clock forces a manual timezone conversion on every read. Falls back to
+    UTC if not given or invalid."""
+    display_tz = _resolve_tz(tz)
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib import colors
@@ -319,9 +348,19 @@ async def export_pdf(
         raise HTTPException(status_code=500, detail="reportlab not installed.")
 
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4,
-                            rightMargin=2*cm, leftMargin=2*cm,
-                            topMargin=2*cm, bottomMargin=2*cm)
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2*cm, bottomMargin=2*cm,
+        # SimpleDocTemplate doesn't set the PDF's /Title or /Author by
+        # default, so PDF viewers (Edge's built-in one especially) that
+        # display the document's own metadata instead of the on-disk
+        # filename fall back to showing "(anonymous)" in the title bar.
+        title="Vulnerax_report",
+        author="VulneraX",
+        subject="Vulnerability Risk Assessment Report",
+        creator="VulneraX",
+    )
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("Title", parent=styles["Title"], fontSize=18, spaceAfter=12)
@@ -382,16 +421,15 @@ async def export_pdf(
         PriorityTier.UNSCORED: "Unscored",
     }
 
-    # Both timestamps must share the same clock — session.scan_date is set
-    # server-side as UTC (see pipeline.py), so "now" has to be UTC too, or
-    # the two times printed on the title page look inconsistent (generation
-    # appearing hours before/after ingestion) purely because of whatever
-    # timezone the backend host happens to be running in.
-    now = datetime.now(timezone.utc)
-    generation_time_str = now.strftime("%d:%m:%Y-%H:%M:%S") + " UTC"
+    # Both timestamps must share the same clock — session.scan_date is
+    # stored as UTC (see pipeline.py) and "now" is generated fresh here, so
+    # both are converted into display_tz (the caller's own timezone, or UTC
+    # if none was given) before formatting, so they can never disagree with
+    # each other regardless of what timezone the backend host itself runs in.
+    now = datetime.now(display_tz)
+    generation_time_str = now.strftime("%d:%m:%Y-%H:%M:%S %Z")
     report_date_str = now.strftime("%B %d, %Y")
-    _scan_fmt = _format_scan_date(session.scan_date)
-    scan_time_str = f"{_scan_fmt} UTC" if _scan_fmt else generation_time_str
+    scan_time_str = _format_scan_date(session.scan_date, tz=display_tz, fmt="%d:%m:%Y-%H:%M:%S %Z") or generation_time_str
 
     story = []
 
@@ -547,7 +585,7 @@ async def export_pdf(
         # Raw scan_date can carry sub-microsecond precision or an odd offset
         # that both breaks fromisoformat and overflows the narrow DETECTED
         # column (wrapping mid-string) — reformat to something short & clean.
-        detected = _format_scan_date(f.scan_date or session.scan_date, "%b %d, %Y %H:%M") or "—"
+        detected = _format_scan_date(f.scan_date or session.scan_date, "%b %d, %Y %H:%M %Z", tz=display_tz) or "—"
 
         section = []
 
@@ -711,7 +749,7 @@ async def export_pdf(
             ]))
             story.append(ft)
             if f.description:
-                story.append(Paragraph(f"Description: {_safe(f.description, 300)}", normal))
+                story.append(Paragraph(f"Description: {_safe(_strip_html(f.description), 300)}", normal))
             story.append(Spacer(1, 0.3*cm))
 
     def _footer(canvas, doc_):
@@ -751,7 +789,13 @@ async def export_pdf(
     if current_user and authorization:
         try:
             user_jwt = authorization.split(" ", 1)[1].strip()
-            file_name = f"{session.session_id}.pdf"
+            # The raw session UUID alone as the filename is what Storage's
+            # signed URL — and so the browser's Save As dialog — shows,
+            # since it's the last path segment of the object key. Keep a
+            # short slice of the UUID for uniqueness (upload_pdf uses
+            # upsert=true, so two reports sharing an exact filename would
+            # silently overwrite each other) behind a readable prefix.
+            file_name = f"vulnerax_report_{session.session_id[:8]}.pdf"
             # Ensure the scan_sessions row exists (upserts a bare one if
             # "Store Report" was never clicked) BEFORE save_report_record,
             # since reports.session_id has a foreign key on scan_sessions —
